@@ -6,7 +6,9 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
+const { parseReceiptText } = require('./services/parserService');
 app.use(express.json());
+
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -24,6 +26,33 @@ function detectCategory(itemName) {
   }
   return 'Kebutuhan Umum';
 }
+
+app.post('/api/parse-receipt', (async (req, res) => {
+  try {
+    const { rawText } = req.body; // Teks mentah dari Tesseract.js di frontend/backend
+
+    if (!rawText) {
+      return res.status(400).json({ error: 'Teks OCR tidak boleh kosong' });
+    }
+
+    // Jalankan parsing engine
+    const extractedItems = parseReceiptText(rawText);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil mengekstraksi struk',
+      data: extractedItems
+    });
+
+  } catch (error) {
+    console.error('Error saat parsing:', error);
+    return res.status(500).json({ error: 'Terjadi kesalahan pada server' });
+  }
+}));
+
+app.listen(3000, () => {
+  console.log('Server berjalan di port 3000');
+});
 
 app.post('/api/scan', upload.single('receipt'), async (req, res) => {
   try {
