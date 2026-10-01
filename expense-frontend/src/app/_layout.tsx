@@ -1,10 +1,12 @@
 import { Stack } from 'expo-router';
+import { FinanceProvider } from '../context/FinanceContext';
 
 export default function RootLayout() {
   return (
-    <Stack screenOptions={{ headerStyle: { backgroundColor: '#f8f9fa' }, headerTintColor: '#212529' }}>
-      <Stack.Screen name="index" options={{ title: 'Smart Expense' }} />
-      <Stack.Screen name="scan" options={{ title: 'Scan Struk Belanja' }} />
-    </Stack>
+    <FinanceProvider>
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="(tabs)" />
+      </Stack>
+    </FinanceProvider>
   );
 }

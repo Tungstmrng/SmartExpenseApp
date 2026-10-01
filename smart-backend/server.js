@@ -3,16 +3,14 @@ const multer = require('multer');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const cors = require('cors');
+const { parseReceiptText, correctOcrPrice } = require('./services/parserService');
 
 const app = express();
 app.use(cors());
-const { parseReceiptText } = require('./services/parserService');
 app.use(express.json());
-
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Fungsi kategori generik yang fleksibel untuk berbagai jenis barang
 function detectCategory(itemName) {
   const name = itemName.toLowerCase();
   if (name.includes('beras') || name.includes('minyak') || name.includes('gula') || name.includes('telur') || name.includes('susu') || name.includes('tepung') || name.includes('daging') || name.includes('ikan') || name.includes('sayur') || name.includes('kol')) {
@@ -27,15 +25,15 @@ function detectCategory(itemName) {
   return 'Kebutuhan Umum';
 }
 
+// Endpoint untuk parsing teks mentah
 app.post('/api/parse-receipt', (async (req, res) => {
   try {
-    const { rawText } = req.body; // Teks mentah dari Tesseract.js di frontend/backend
+    const { rawText } = req.body; 
 
     if (!rawText) {
       return res.status(400).json({ error: 'Teks OCR tidak boleh kosong' });
     }
 
-    // Jalankan parsing engine
     const extractedItems = parseReceiptText(rawText);
 
     return res.status(200).json({
@@ -50,17 +48,14 @@ app.post('/api/parse-receipt', (async (req, res) => {
   }
 }));
 
-app.listen(3000, () => {
-  console.log('Server berjalan di port 3000');
-});
-
+// Endpoint utama scan gambar struk
 app.post('/api/scan', upload.single('receipt'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Tidak ada file gambar struk.' });
     }
 
-    console.log('Melakukan pra-pemrosesan gambar universal (Sharp)...');
+    console.log('Melakukan pra-pemrosesan gambar (Sharp)...');
 
     const processedBuffer = await sharp(req.file.buffer)
       .resize({ width: 1800, withoutEnlargement: true })
@@ -86,6 +81,7 @@ app.post('/api/scan', upload.single('receipt'), async (req, res) => {
 
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
     
+    // 1. Ekstraksi Nama Merchant (Contoh: VILLA TIDAR MALANG)
     let merchantName = 'Toko / Minimarket Umum';
     for (let i = 0; i < Math.min(5, lines.length); i++) {
       const line = lines[i];
@@ -104,90 +100,68 @@ app.post('/api/scan', upload.single('receipt'), async (req, res) => {
       }
     }
 
-    let totalAmount = 0;
-    const items = [];
+    // 2. Ekstraksi Ringkasan Keuangan (Subtotal, Diskon, Voucher, Total)[cite: 1, 2]
+    let subtotalAmount = 0;
+    let totalDiscountAmount = 0;
+    let voucherAmount = 0;
+    let deliveryFee = 0;
+    let finalTotalAmount = 0;
 
-    const boilerplateBlacklist = [
-      'PT', 'CV', 'TOKO', 'MINIMARKET', 'SUPERMARKET', 'NPWP', 'PENGUKUHAN', 
-      'PERUMAHAN', 'VILA', 'JL.', 'JALAN', 'TELP', 'PHONE', 'DESKRIPSI', 'QTY', 
-      'HARGA', 'TOTAL', 'SUB', 'PPN', 'PB1', 'MANDIRI', 'VISA', 'BCA', 'DEBIT', 
-      'CASH', 'TRANSFER', 'TUNAI', 'KEMBALI', 'HEMAT', 'POT.', 'BKP', 'BTKP', 
-      'DPP', 'TERIMA KASIH', 'THANK', 'SARAN', 'PULSA', 'WHATSAPP', 'EMAIL', 
-      'STICKER', 'PERIODE', 'KASIR', 'NOMOR', 'NO:', 'TGL', 'DATE', 'ANDA'
-    ];
+    lines.forEach(line => {
+      const upper = line.toUpperCase();
+      const numbers = line.match(/[\d.,\-]+/g);
+      
+      if (!numbers) return;
+      const lastNumStr = correctOcrPrice(numbers[numbers.length - 1]);
+      const val = parseInt(lastNumStr.replace(/[.,]/g, ''), 10);
 
-    lines.forEach((line) => {
-      const upperLine = line.toUpperCase();
+      if (isNaN(val)) return;
 
-      if (
-        (upperLine.includes('SUB TOTAL') || (upperLine.includes('TOTAL') && !upperLine.includes('ITEM') && !upperLine.includes('HEMAT'))) &&
-        !upperLine.includes('QTY')
-      ) {
-        const numbers = line.match(/[\d.,]+/g);
-        if (numbers) {
-          const cleanNum = numbers[numbers.length - 1].replace(/\./g, '').replace(/,/g, '');
-          const parsed = parseInt(cleanNum, 10);
-          if (!isNaN(parsed) && parsed > totalAmount && parsed < 100000000) {
-            totalAmount = parsed;
-          }
-        }
-        return;
-      }
-
-      const isBoilerplate = boilerplateBlacklist.some(keyword => upperLine.includes(keyword));
-      if (isBoilerplate || line.length < 5 || /^\d{2}[-/]\d{2}/.test(line)) {
-        return;
-      }
-
-      let cleanLine = line.replace(/(\d)\s+([.,])\s+(\d)/g, '$1$2$3');
-      cleanLine = cleanLine.replace(/(\d)\s+(\d{3})/g, '$1$2');
-
-      const priceMatches = cleanLine.match(/(\d{1,3}(?:[.,]\d{3})+|\d{4,})/g);
-
-      if (priceMatches && priceMatches.length > 0) {
-        const lastPriceStr = priceMatches[priceMatches.length - 1].replace(/[.,]/g, '');
-        const price = parseInt(lastPriceStr, 10);
-
-        if (!isNaN(price) && price >= 1000 && price <= 10000000) {
-          let itemName = cleanLine;
-
-          priceMatches.forEach(num => {
-            itemName = itemName.replace(num, '');
-          });
-
-          itemName = itemName.replace(/^[0-9]+\s*([xX]|PCS|PCE|BKS|UNIT)?\s*/, '').trim();
-          itemName = itemName.replace(/^[|\\/:\-\.\s]+|[|\\/:\-\.\s]+$/g, '');
-          itemName = itemName.replace(/[\/\-\|\.\,\"\'\„]/g, ' ').replace(/\s+/g, ' ').trim();
-
-          const alphabeticChars = itemName.replace(/[^a-zA-Z]/g, '');
-
-          if (alphabeticChars.length >= 3 && !/^\d+$/.test(itemName)) {
-            items.push({
-              id: items.length + 1,
-              name: itemName,
-              price: price,
-              category: detectCategory(itemName)
-            });
-          }
-        }
+      if (upper.includes('SUBTOTAL') || upper.includes('SUB TOTAL')) {
+        subtotalAmount = val;
+      } else if (upper.includes('TOTAL DISKON') || upper.includes('DISC')) {
+        totalDiscountAmount = Math.abs(val);
+      } else if (upper.includes('VOUCHER')) {
+        voucherAmount = Math.abs(val);
+      } else if (upper.includes('BIAYA PENGIRIMAN') || upper.includes('ONGKIR')) {
+        deliveryFee = val;
+      } else if (upper.includes('TOTAL') && !upper.includes('ITEM') && !upper.includes('DISKON') && !upper.includes('SUB')) {
+        finalTotalAmount = val;
       }
     });
 
-    if (totalAmount === 0 && items.length > 0) {
-      totalAmount = items.reduce((sum, item) => sum + item.price, 0);
+    // 3. Panggil parser service terpusat untuk mendapatkan daftar item + diskon per item
+    const rawParsedItems = parseReceiptText(text);
+
+    const items = rawParsedItems.map((item, idx) => ({
+      id: idx + 1,
+      name: item.name,
+      price: item.price,
+      discount: item.discount || 0,
+      final_price: item.final_price || item.price,
+      category: detectCategory(item.name)
+    }));
+
+    // Fallback jika total akhir tidak terbaca dari ringkasan
+    if (finalTotalAmount === 0 && items.length > 0) {
+      finalTotalAmount = items.reduce((sum, item) => sum + item.final_price, 0);
     }
-    if (totalAmount === 0) {
-      totalAmount = 25000;
+    if (finalTotalAmount === 0) {
+      finalTotalAmount = 25000;
     }
 
     return res.json({
       success: true,
-      message: 'OCR Universal Parsing Konsisten Berhasil!',
+      message: 'OCR Universal Parsing dengan Ringkasan Finansial Berhasil!',
       data: {
         merchant_name: merchantName,
-        total_amount: totalAmount,
+        subtotal: subtotalAmount || finalTotalAmount,
+        total_discount: totalDiscountAmount,
+        voucher: voucherAmount,
+        delivery_fee: deliveryFee,
+        total_amount: finalTotalAmount,
         items: items.length > 0 ? items : [
-          { id: 1, name: "Belanjaan Umum", price: totalAmount, category: "Kebutuhan Umum" }
+          { id: 1, name: "Belanjaan Umum", price: finalTotalAmount, discount: 0, final_price: finalTotalAmount, category: "Kebutuhan Umum" }
         ]
       }
     });
@@ -201,4 +175,4 @@ app.post('/api/scan', upload.single('receipt'), async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Backend OCR Konsisten berjalan di port ${PORT}`));
+app.listen(PORT, () => console.log(`Backend OCR berjalan di port ${PORT}`));
